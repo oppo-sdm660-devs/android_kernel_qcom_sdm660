@@ -1516,7 +1516,8 @@ static inline struct page *alloc_slab_page(struct kmem_cache *s,
 	else
 		page = __alloc_pages_node(node, flags, order);
 
-	if (page && memcg_charge_slab(page, flags, order, s, oo_objects(oo))) {
+	if (page && charge_slab_page(page, flags, order, s,
+				     oo_objects(oo))) {
 		__free_pages(page, order);
 		page = NULL;
 	}
@@ -1731,11 +1732,6 @@ out:
 	if (!page)
 		return NULL;
 
-	mod_lruvec_page_state(page,
-		(s->flags & SLAB_RECLAIM_ACCOUNT) ?
-		NR_SLAB_RECLAIMABLE : NR_SLAB_UNRECLAIMABLE,
-		1 << oo_order(oo));
-
 	inc_slabs_node(s, page_to_nid(page), page->objects);
 
 	return page;
@@ -1776,7 +1772,7 @@ static void __free_slab(struct kmem_cache *s, struct page *page)
 	page->mapping = NULL;
 	if (current->reclaim_state)
 		current->reclaim_state->reclaimed_slab += pages;
-	memcg_uncharge_slab(page, order, s);
+	uncharge_slab_page(page, order, s);
 	kasan_alloc_pages(page, order);
 	__free_pages(page, order);
 }

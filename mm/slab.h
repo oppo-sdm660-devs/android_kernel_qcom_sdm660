@@ -204,6 +204,12 @@ ssize_t slabinfo_write(struct file *file, const char __user *buffer,
 void __kmem_cache_free_bulk(struct kmem_cache *, size_t, void **);
 int __kmem_cache_alloc_bulk(struct kmem_cache *, gfp_t, size_t, void **);
 
+static inline int cache_vmstat_idx(struct kmem_cache *s)
+{
+	return (s->flags & SLAB_RECLAIM_ACCOUNT) ?
+		NR_SLAB_RECLAIMABLE_B : NR_SLAB_UNRECLAIMABLE_B;
+}
+
 #ifdef CONFIG_MEMCG_KMEM
 
 /* List of all root caches. */
@@ -344,6 +350,8 @@ static __always_inline int memcg_charge_slab(struct page *page,
 					     struct kmem_cache *s,
 					     unsigned int objects)
 {
+	struct mem_cgroup *memcg;
+	struct lruvec *lruvec;
 	int ret;
 
 	if (!memcg_kmem_enabled() || is_root_cache(s))
@@ -353,20 +361,34 @@ static __always_inline int memcg_charge_slab(struct page *page,
 	if (ret)
 		return ret;
 
-	ret = __memcg_kmem_charge(s->memcg_params.memcg, gfp, 1 << order);
-	if (ret)
+	memcg = s->memcg_params.memcg;
+	ret = __memcg_kmem_charge(memcg, gfp, 1 << order);
+	if (ret) {
 		memcg_free_page_obj_cgroups(page);
-	return ret;
+		return ret;
+	}
+
+	lruvec = mem_cgroup_lruvec(page_pgdat(page), memcg);
+	mod_memcg_lruvec_state(lruvec, cache_vmstat_idx(s),
+			       PAGE_SIZE << order);
+	return 0;
 }
 
 static __always_inline void memcg_uncharge_slab(struct page *page, int order,
 						struct kmem_cache *s)
 {
+	struct mem_cgroup *memcg;
+	struct lruvec *lruvec;
+
 	if (!memcg_kmem_enabled() || is_root_cache(s))
 		return;
 
+	memcg = s->memcg_params.memcg;
+	lruvec = mem_cgroup_lruvec(page_pgdat(page), memcg);
+	mod_memcg_lruvec_state(lruvec, cache_vmstat_idx(s),
+			       -(PAGE_SIZE << order));
 	memcg_free_page_obj_cgroups(page);
-	__memcg_kmem_uncharge(s->memcg_params.memcg, 1 << order);
+	__memcg_kmem_uncharge(memcg, 1 << order);
 }
 
 extern void slab_init_memcg_params(struct kmem_cache *);
@@ -452,6 +474,28 @@ static inline void memcg_link_cache(struct kmem_cache *s)
 }
 
 #endif /* CONFIG_MEMCG_KMEM */
+
+static __always_inline int charge_slab_page(struct page *page,
+					    gfp_t gfp, int order,
+					    struct kmem_cache *s,
+					    unsigned int objects)
+{
+	int ret;
+
+	ret = memcg_charge_slab(page, gfp, order, s, objects);
+	if (!ret)
+		mod_node_page_state(page_pgdat(page), cache_vmstat_idx(s),
+				    PAGE_SIZE << order);
+	return ret;
+}
+
+static __always_inline void uncharge_slab_page(struct page *page, int order,
+					       struct kmem_cache *s)
+{
+	mod_node_page_state(page_pgdat(page), cache_vmstat_idx(s),
+			    -(PAGE_SIZE << order));
+	memcg_uncharge_slab(page, order, s);
+}
 
 static inline struct kmem_cache *virt_to_cache(const void *obj)
 {
