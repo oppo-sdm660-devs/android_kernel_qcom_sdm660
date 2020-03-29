@@ -1359,6 +1359,8 @@ static inline int memcg_cache_id(struct mem_cgroup *memcg)
 	return memcg ? memcg->kmemcg_id : -1;
 }
 
+struct mem_cgroup *mem_cgroup_from_obj(void *p);
+
 extern int memcg_expand_shrinker_maps(int new_id);
 
 extern void memcg_set_shrinker_bit(struct mem_cgroup *memcg,
@@ -1375,6 +1377,11 @@ static inline bool memcg_kmem_enabled(void)
 static inline int memcg_cache_id(struct mem_cgroup *memcg)
 {
 	return -1;
+}
+
+static inline struct mem_cgroup *mem_cgroup_from_obj(void *p)
+{
+	return NULL;
 }
 
 static inline void memcg_get_cache_ids(void)
