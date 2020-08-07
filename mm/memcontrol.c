@@ -2735,7 +2735,8 @@ static inline bool memcg_kmem_bypass(void)
  * done with it, memcg_kmem_put_cache() must be called to release the
  * reference.
  */
-struct kmem_cache *memcg_kmem_get_cache(struct kmem_cache *cachep)
+struct kmem_cache *memcg_kmem_get_cache(struct kmem_cache *cachep,
+					struct obj_cgroup **objcgp)
 {
 	struct mem_cgroup *memcg;
 	struct kmem_cache *memcg_cachep;
@@ -2755,8 +2756,19 @@ struct kmem_cache *memcg_kmem_get_cache(struct kmem_cache *cachep)
 		goto out;
 
 	memcg_cachep = cache_from_memcg_idx(cachep, kmemcg_id);
-	if (likely(memcg_cachep))
-		return memcg_cachep;
+	if (likely(memcg_cachep)) {
+		struct obj_cgroup *objcg;
+
+		rcu_read_lock();
+		objcg = rcu_dereference(memcg->objcg);
+		if (objcg && obj_cgroup_tryget(objcg)) {
+			*objcgp = objcg;
+			rcu_read_unlock();
+			return memcg_cachep;
+		}
+		rcu_read_unlock();
+		goto out;
+	}
 
 	/*
 	 * If we are in a safe context (can wait, and not in interrupt
