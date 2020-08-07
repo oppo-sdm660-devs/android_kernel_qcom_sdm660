@@ -988,8 +988,8 @@ unsigned long sum_zone_numa_state(int node,
 /*
  * Determine the per node value of a stat item.
  */
-unsigned long node_page_state(struct pglist_data *pgdat,
-				enum node_stat_item item)
+unsigned long node_page_state_pages(struct pglist_data *pgdat,
+				    enum node_stat_item item)
 {
 	long x = atomic_long_read(&pgdat->vm_stat[item]);
 #ifdef CONFIG_SMP
@@ -997,6 +997,14 @@ unsigned long node_page_state(struct pglist_data *pgdat,
 		x = 0;
 #endif
 	return x;
+}
+
+unsigned long node_page_state(struct pglist_data *pgdat,
+				      enum node_stat_item item)
+{
+	VM_WARN_ON_ONCE(vmstat_item_in_bytes(item));
+
+	return node_page_state_pages(pgdat, item);
 }
 #endif
 
@@ -1562,7 +1570,7 @@ static void zoneinfo_show_print(struct seq_file *m, pg_data_t *pgdat,
 			seq_printf(m, "\n      %-12s %lu",
 				vmstat_text[i + NR_VM_ZONE_STAT_ITEMS +
 				NR_VM_NUMA_STAT_ITEMS],
-				node_page_state(pgdat, i));
+				node_page_state_pages(pgdat, i));
 		}
 	}
 	seq_printf(m,
@@ -1690,7 +1698,7 @@ static void *vmstat_start(struct seq_file *m, loff_t *pos)
 #endif
 
 	for (i = 0; i < NR_VM_NODE_STAT_ITEMS; i++)
-		v[i] = global_node_page_state(i);
+		v[i] = global_node_page_state_pages(i);
 	v += NR_VM_NODE_STAT_ITEMS;
 
 	global_dirty_limits(v + NR_DIRTY_BG_THRESHOLD,

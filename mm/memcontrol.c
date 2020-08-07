@@ -3207,12 +3207,6 @@ static void memcg_free_kmem(struct mem_cgroup *memcg)
 	/* css_alloc() failed, offlining didn't happen */
 	if (unlikely(memcg->kmem_state == KMEM_ONLINE))
 		memcg_offline_kmem(memcg);
-
-	if (memcg->kmem_state == KMEM_ALLOCATED) {
-		memcg_destroy_kmem_caches(memcg);
-		static_branch_dec(&memcg_kmem_enabled_key);
-		WARN_ON(page_counter_read(&memcg->kmem));
-	}
 }
 #else
 static int memcg_online_kmem(struct mem_cgroup *memcg)
@@ -5674,8 +5668,10 @@ static int memory_stat_show(struct seq_file *m, void *v)
 	seq_printf(m, "kernel_stack %llu\n",
 		   (u64)acc.stat[MEMCG_KERNEL_STACK_KB] * 1024);
 	seq_printf(m, "slab %llu\n",
-		   (u64)(acc.stat[NR_SLAB_RECLAIMABLE] +
-			 acc.stat[NR_SLAB_UNRECLAIMABLE]) * PAGE_SIZE);
+		   (u64)(acc.stat[NR_SLAB_RECLAIMABLE_B] +
+			 acc.stat[NR_SLAB_UNRECLAIMABLE_B]));
+	seq_printf(m, "percpu %llu\n",
+		   (u64)acc.stat[MEMCG_PERCPU_B]);
 	seq_printf(m, "sock %llu\n",
 		   (u64)acc.stat[MEMCG_SOCK] * PAGE_SIZE);
 
@@ -5693,9 +5689,9 @@ static int memory_stat_show(struct seq_file *m, void *v)
 			   (u64)acc.lru_pages[i] * PAGE_SIZE);
 
 	seq_printf(m, "slab_reclaimable %llu\n",
-		   (u64)acc.stat[NR_SLAB_RECLAIMABLE] * PAGE_SIZE);
+		   (u64)acc.stat[NR_SLAB_RECLAIMABLE_B]);
 	seq_printf(m, "slab_unreclaimable %llu\n",
-		   (u64)acc.stat[NR_SLAB_UNRECLAIMABLE] * PAGE_SIZE);
+		   (u64)acc.stat[NR_SLAB_UNRECLAIMABLE_B]);
 
 	/* Accumulated memory events */
 

@@ -43,10 +43,18 @@ enum memcg_stat_item {
 	MEMCG_RSS_HUGE,
 	MEMCG_SWAP,
 	MEMCG_SOCK,
+	MEMCG_PERCPU_B,
 	/* XXX: why are these zone and not node counters? */
 	MEMCG_KERNEL_STACK_KB,
 	MEMCG_NR_STAT,
 };
+
+static __always_inline bool memcg_stat_item_in_bytes(int idx)
+{
+	if (idx == MEMCG_PERCPU_B)
+		return true;
+	return vmstat_item_in_bytes(idx);
+}
 
 enum memcg_memory_event {
 	MEMCG_LOW,
@@ -576,15 +584,18 @@ static inline unsigned long memcg_page_state(struct mem_cgroup *memcg,
 
 /* idx can be of type enum memcg_stat_item or node_stat_item */
 static inline void __mod_memcg_state(struct mem_cgroup *memcg,
-				     int idx, int val)
+					 int idx, int val)
 {
-	long x;
+	long x, threshold = MEMCG_CHARGE_BATCH;
 
 	if (mem_cgroup_disabled())
 		return;
 
+	if (memcg_stat_item_in_bytes(idx))
+		threshold <<= PAGE_SHIFT;
+
 	x = val + __this_cpu_read(memcg->stat_cpu->count[idx]);
-	if (unlikely(abs(x) > MEMCG_CHARGE_BATCH)) {
+	if (unlikely(abs(x) > threshold)) {
 		atomic_long_add(x, &memcg->stat[idx]);
 		x = 0;
 	}
@@ -655,14 +666,11 @@ static inline unsigned long lruvec_page_state(struct lruvec *lruvec,
 	return x;
 }
 
-static inline void __mod_lruvec_state(struct lruvec *lruvec,
+static inline void __mod_memcg_lruvec_state(struct lruvec *lruvec,
 				      enum node_stat_item idx, int val)
 {
 	struct mem_cgroup_per_node *pn;
-	long x;
-
-	/* Update node */
-	__mod_node_page_state(lruvec_pgdat(lruvec), idx, val);
+	long x, threshold = MEMCG_CHARGE_BATCH;
 
 	if (mem_cgroup_disabled())
 		return;
@@ -673,16 +681,37 @@ static inline void __mod_lruvec_state(struct lruvec *lruvec,
 	__mod_memcg_state(pn->memcg, idx, val);
 
 	/* Update lruvec */
+	if (vmstat_item_in_bytes(idx))
+		threshold <<= PAGE_SHIFT;
+
 	x = val + __this_cpu_read(pn->lruvec_stat_cpu->count[idx]);
-	if (unlikely(abs(x) > MEMCG_CHARGE_BATCH)) {
+	if (unlikely(abs(x) > threshold)) {
 		atomic_long_add(x, &pn->lruvec_stat[idx]);
 		x = 0;
 	}
 	__this_cpu_write(pn->lruvec_stat_cpu->count[idx], x);
 }
 
+static inline void __mod_lruvec_state(struct lruvec *lruvec,
+				      enum node_stat_item idx, int val)
+{
+	/* Update node */
+	__mod_node_page_state(lruvec_pgdat(lruvec), idx, val);
+	__mod_memcg_lruvec_state(lruvec, idx, val);
+}
+
+static inline void mod_memcg_lruvec_state(struct lruvec *lruvec,
+				  enum node_stat_item idx, int val)
+{
+	unsigned long flags;
+
+	local_irq_save(flags);
+	__mod_memcg_lruvec_state(lruvec, idx, val);
+	local_irq_restore(flags);
+}
+
 static inline void mod_lruvec_state(struct lruvec *lruvec,
-				    enum node_stat_item idx, int val)
+				      enum node_stat_item idx, int val)
 {
 	unsigned long flags;
 
@@ -1073,14 +1102,24 @@ static inline unsigned long lruvec_page_state(struct lruvec *lruvec,
 	return node_page_state(lruvec_pgdat(lruvec), idx);
 }
 
+static inline void __mod_memcg_lruvec_state(struct lruvec *lruvec,
+					    enum node_stat_item idx, int val)
+{
+}
+
 static inline void __mod_lruvec_state(struct lruvec *lruvec,
 				      enum node_stat_item idx, int val)
 {
 	__mod_node_page_state(lruvec_pgdat(lruvec), idx, val);
 }
 
+static inline void mod_memcg_lruvec_state(struct lruvec *lruvec,
+					  enum node_stat_item idx, int val)
+{
+}
+
 static inline void mod_lruvec_state(struct lruvec *lruvec,
-				    enum node_stat_item idx, int val)
+				      enum node_stat_item idx, int val)
 {
 	mod_node_page_state(lruvec_pgdat(lruvec), idx, val);
 }

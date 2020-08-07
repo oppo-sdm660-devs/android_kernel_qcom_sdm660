@@ -732,7 +732,7 @@ int __vm_enough_memory(struct mm_struct *mm, long pages, int cap_sys_admin)
 		 * which are reclaimable, under pressure.  The dentry
 		 * cache and most inode caches should fall into this
 		 */
-		free += global_node_page_state(NR_SLAB_RECLAIMABLE);
+	free += global_node_page_state_pages(NR_SLAB_RECLAIMABLE_B);
 
 		/*
 		 * Part of the kernel memory, which can be released

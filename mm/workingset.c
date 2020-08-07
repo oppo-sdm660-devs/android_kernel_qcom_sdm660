@@ -423,8 +423,8 @@ static unsigned long count_shadow_nodes(struct shrinker *shrinker,
 		pages = mem_cgroup_node_nr_lru_pages(sc->memcg, sc->nid,
 						     LRU_ALL);
 		lruvec = mem_cgroup_lruvec(NODE_DATA(sc->nid), sc->memcg);
-		pages += lruvec_page_state(lruvec, NR_SLAB_RECLAIMABLE);
-		pages += lruvec_page_state(lruvec, NR_SLAB_UNRECLAIMABLE);
+		pages += lruvec_page_state(lruvec, NR_SLAB_RECLAIMABLE_B) >> PAGE_SHIFT;
+		pages += lruvec_page_state(lruvec, NR_SLAB_UNRECLAIMABLE_B) >> PAGE_SHIFT;
 	} else
 #endif
 		pages = node_present_pages(sc->nid);
