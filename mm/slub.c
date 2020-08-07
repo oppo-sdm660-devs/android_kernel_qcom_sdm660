@@ -1516,7 +1516,7 @@ static inline struct page *alloc_slab_page(struct kmem_cache *s,
 	else
 		page = __alloc_pages_node(node, flags, order);
 
-	if (page && memcg_charge_slab(page, flags, order, s)) {
+	if (page && memcg_charge_slab(page, flags, order, s, oo_objects(oo))) {
 		__free_pages(page, order);
 		page = NULL;
 	}

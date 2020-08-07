@@ -1397,7 +1397,7 @@ static struct page *kmem_getpages(struct kmem_cache *cachep, gfp_t flags,
 		return NULL;
 	}
 
-	if (memcg_charge_slab(page, flags, cachep->gfporder, cachep)) {
+	if (memcg_charge_slab(page, flags, cachep->gfporder, cachep, cachep->num)) {
 		__free_pages(page, cachep->gfporder);
 		return NULL;
 	}

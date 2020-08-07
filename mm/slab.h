@@ -273,23 +273,54 @@ static inline struct kmem_cache *memcg_root_cache(struct kmem_cache *s)
 	return s->memcg_params.root_cache;
 }
 
+static inline int memcg_alloc_page_obj_cgroups(struct page *page,
+					       unsigned int objects, gfp_t gfp)
+{
+	struct obj_cgroup **vec;
+
+	vec = kcalloc_node(objects, sizeof(*vec), gfp, page_to_nid(page));
+	if (!vec)
+		return -ENOMEM;
+
+	page->memcg_data = (unsigned long)vec | MEMCG_DATA_OBJCGS;
+	kmemleak_not_leak(vec);
+	return 0;
+}
+
+static inline void memcg_free_page_obj_cgroups(struct page *page)
+{
+	kfree(page_objcgs(page));
+	page->memcg_data = 0;
+}
+
 static __always_inline int memcg_charge_slab(struct page *page,
 					     gfp_t gfp, int order,
-					     struct kmem_cache *s)
+					     struct kmem_cache *s,
+					     unsigned int objects)
 {
-	if (!memcg_kmem_enabled())
+	int ret;
+
+	if (!memcg_kmem_enabled() || is_root_cache(s))
 		return 0;
-	if (is_root_cache(s))
-		return 0;
-	return memcg_kmem_charge_memcg(page, gfp, order, s->memcg_params.memcg);
+
+	ret = memcg_alloc_page_obj_cgroups(page, objects, gfp);
+	if (ret)
+		return ret;
+
+	ret = __memcg_kmem_charge(s->memcg_params.memcg, gfp, 1 << order);
+	if (ret)
+		memcg_free_page_obj_cgroups(page);
+	return ret;
 }
 
 static __always_inline void memcg_uncharge_slab(struct page *page, int order,
 						struct kmem_cache *s)
 {
-	if (!memcg_kmem_enabled())
+	if (!memcg_kmem_enabled() || is_root_cache(s))
 		return;
-	memcg_kmem_uncharge(page, order);
+
+	memcg_free_page_obj_cgroups(page);
+	__memcg_kmem_uncharge(s->memcg_params.memcg, 1 << order);
 }
 
 extern void slab_init_memcg_params(struct kmem_cache *);
@@ -333,8 +364,19 @@ static inline struct kmem_cache *memcg_root_cache(struct kmem_cache *s)
 	return s;
 }
 
+static inline int memcg_alloc_page_obj_cgroups(struct page *page,
+					       unsigned int objects, gfp_t gfp)
+{
+	return 0;
+}
+
+static inline void memcg_free_page_obj_cgroups(struct page *page)
+{
+}
+
 static inline int memcg_charge_slab(struct page *page, gfp_t gfp, int order,
-				    struct kmem_cache *s)
+				    struct kmem_cache *s,
+				    unsigned int objects)
 {
 	return 0;
 }
