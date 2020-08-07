@@ -2022,7 +2022,6 @@ static void drain_stock(struct memcg_stock_pcp *stock)
 		page_counter_uncharge(&old->memory, stock->nr_pages);
 		if (do_memsw_account())
 			page_counter_uncharge(&old->memsw, stock->nr_pages);
-		css_put_many(&old->css, stock->nr_pages);
 		stock->nr_pages = 0;
 	}
 
@@ -2343,12 +2342,9 @@ force:
 	page_counter_charge(&memcg->memory, nr_pages);
 	if (do_memsw_account())
 		page_counter_charge(&memcg->memsw, nr_pages);
-	css_get_many(&memcg->css, nr_pages);
-
 	return 0;
 
 done_restock:
-	css_get_many(&memcg->css, batch);
 	if (batch > nr_pages)
 		refill_stock(memcg, batch - nr_pages);
 
@@ -2386,7 +2382,6 @@ static void cancel_charge(struct mem_cgroup *memcg, unsigned int nr_pages)
 	if (do_memsw_account())
 		page_counter_uncharge(&memcg->memsw, nr_pages);
 
-	css_put_many(&memcg->css, nr_pages);
 }
 
 static void lock_page_lru(struct page *page, int *isolated)
@@ -2710,8 +2705,10 @@ int memcg_kmem_charge(struct page *page, gfp_t gfp, int order)
 	memcg = get_mem_cgroup_from_current();
 	if (!mem_cgroup_is_root(memcg)) {
 		ret = memcg_kmem_charge_memcg(page, gfp, order, memcg);
-		if (!ret)
+		if (!ret) {
 			page->memcg_data |= MEMCG_DATA_KMEM;
+			return 0;
+		}
 	}
 	css_put(&memcg->css);
 	return ret;
@@ -2740,7 +2737,7 @@ void memcg_kmem_uncharge(struct page *page, int order)
 
 	page->memcg_data = 0;
 
-	css_put_many(&memcg->css, nr_pages);
+	css_put(&memcg->css);
 }
 #endif /* CONFIG_MEMCG_KMEM */
 
@@ -2752,6 +2749,7 @@ void memcg_kmem_uncharge(struct page *page, int order)
  */
 void mem_cgroup_split_huge_fixup(struct page *head)
 {
+	struct mem_cgroup *memcg = page_memcg(head);
 	int i;
 
 	if (mem_cgroup_disabled())
@@ -2759,8 +2757,9 @@ void mem_cgroup_split_huge_fixup(struct page *head)
 
 	for (i = 1; i < HPAGE_PMD_NR; i++)
 		head[i].memcg_data = head->memcg_data;
+	css_get_many(&memcg->css, HPAGE_PMD_NR - 1);
 
-	__mod_memcg_state(page_memcg(head), MEMCG_RSS_HUGE, -HPAGE_PMD_NR);
+	__mod_memcg_state(memcg, MEMCG_RSS_HUGE, -HPAGE_PMD_NR);
 }
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
 
@@ -4955,7 +4954,8 @@ static int mem_cgroup_move_account(struct page *page,
 	 * uncharging, charging, migration, or LRU putback.
 	 */
 
-	/* caller should have done css_get */
+	css_get(&to->css);
+	css_put(&from->css);
 	page->memcg_data = (unsigned long)to;
 	spin_unlock_irqrestore(&from->move_lock, flags);
 
@@ -5177,8 +5177,6 @@ static void __mem_cgroup_clear_mc(void)
 		 */
 		if (!mem_cgroup_is_root(mc.to))
 			page_counter_uncharge(&mc.to->memory, mc.moved_swap);
-
-		css_put_many(&mc.to->css, mc.moved_swap);
 
 		mc.moved_swap = 0;
 	}
@@ -6122,6 +6120,7 @@ void mem_cgroup_commit_charge(struct page *page, struct mem_cgroup *memcg,
 	if (!memcg)
 		return;
 
+	css_get(&memcg->css);
 	commit_charge(page, memcg, lrucare);
 
 	local_irq_disable();
@@ -6205,9 +6204,6 @@ static void uncharge_batch(const struct uncharge_gather *ug)
 	__this_cpu_add(ug->memcg->stat_cpu->nr_page_events, nr_pages);
 	memcg_check_events(ug->memcg, ug->dummy_page);
 	local_irq_restore(flags);
-
-	if (!mem_cgroup_is_root(ug->memcg))
-		css_put_many(&ug->memcg->css, nr_pages);
 }
 
 static void uncharge_page(struct page *page, struct uncharge_gather *ug)
@@ -6254,6 +6250,7 @@ static void uncharge_page(struct page *page, struct uncharge_gather *ug)
 
 	ug->dummy_page = page;
 	page->memcg_data = 0;
+	css_put(&ug->memcg->css);
 }
 
 static void uncharge_list(struct list_head *page_list)
@@ -6362,7 +6359,7 @@ void mem_cgroup_migrate(struct page *oldpage, struct page *newpage)
 	page_counter_charge(&memcg->memory, nr_pages);
 	if (do_memsw_account())
 		page_counter_charge(&memcg->memsw, nr_pages);
-	css_get_many(&memcg->css, nr_pages);
+	css_get(&memcg->css);
 
 	commit_charge(newpage, memcg, false);
 
@@ -6605,8 +6602,7 @@ void mem_cgroup_swapout(struct page *page, swp_entry_t entry)
 				     -nr_entries);
 	memcg_check_events(memcg, page);
 
-	if (!mem_cgroup_is_root(memcg))
-		css_put_many(&memcg->css, nr_entries);
+	css_put(&memcg->css);
 }
 
 /**
