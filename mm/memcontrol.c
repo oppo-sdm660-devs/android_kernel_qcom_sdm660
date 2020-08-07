@@ -2712,13 +2712,6 @@ static void memcg_schedule_kmem_cache_create(struct mem_cgroup *memcg,
 	current->memcg_kmem_skip_account = 0;
 }
 
-static inline bool memcg_kmem_bypass(void)
-{
-	if (in_interrupt() || !current->mm || (current->flags & PF_KTHREAD))
-		return true;
-	return false;
-}
-
 /**
  * memcg_kmem_get_cache: select the correct per-memcg cache for allocation
  * @cachep: the original global kmem cache
