@@ -2302,13 +2302,6 @@ int __kmem_cache_shrink(struct kmem_cache *cachep)
 	return (ret ? 1 : 0);
 }
 
-#ifdef CONFIG_MEMCG
-void __kmemcg_cache_deactivate(struct kmem_cache *cachep)
-{
-	__kmem_cache_shrink(cachep);
-}
-#endif
-
 int __kmem_cache_shutdown(struct kmem_cache *cachep)
 {
 	return __kmem_cache_shrink(cachep);
@@ -3952,7 +3945,8 @@ static int do_tune_cpucache(struct kmem_cache *cachep, int limit,
 		return ret;
 
 	lockdep_assert_held(&slab_mutex);
-	for_each_memcg_cache(c, cachep) {
+	c = memcg_cache(cachep);
+	if (c) {
 		/* return value determined by the root cache only */
 		__do_tune_cpucache(c, limit, batchcount, shared, gfp);
 	}

@@ -314,10 +314,9 @@ struct mem_cgroup {
 	int			tcpmem_pressure;
 
 #ifdef CONFIG_MEMCG_KMEM
-        /* Index in the kmem_cache->memcg_params.memcg_caches array */
+	/* Index used by memcg-aware shrinker lists. */
 	int kmemcg_id;
 	enum memcg_kmem_state kmem_state;
-	struct list_head kmem_caches;
 	struct obj_cgroup __rcu *objcg;
 	struct list_head objcg_list; /* list of inherited objcgs */
 #endif
@@ -1367,9 +1366,7 @@ static inline bool mem_cgroup_under_socket_pressure(struct mem_cgroup *memcg)
 }
 #endif
 
-struct kmem_cache *memcg_kmem_get_cache(struct kmem_cache *cachep,
-					struct obj_cgroup **objcgp);
-void memcg_kmem_put_cache(struct kmem_cache *cachep);
+struct kmem_cache *memcg_kmem_get_cache(struct kmem_cache *cachep);
 int memcg_kmem_charge_memcg(struct page *page, gfp_t gfp, int order,
 			    struct mem_cgroup *memcg);
 int memcg_kmem_charge(struct page *page, gfp_t gfp, int order);

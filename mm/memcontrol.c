@@ -269,7 +269,7 @@ struct cgroup_subsys_state *vmpressure_to_css(struct vmpressure *vmpr)
 
 #ifdef CONFIG_MEMCG_KMEM
 /*
- * This will be the memcg's index in each cache's ->memcg_params.memcg_caches.
+ * This will be used as a shrinker list's index.
  * The main reason for not using cgroup id for this:
  *  this works better in sparse environments, where we have a lot of memcgs,
  *  but only a few kmem-limited. Or also, if we have, for instance, 200
@@ -2581,6 +2581,23 @@ struct mem_cgroup *mem_cgroup_from_obj(void *p)
 		return NULL;
 
 	page = virt_to_head_page(p);
+
+	/*
+	 * Slab objects are accounted individually, not per-page.  The object
+	 * cgroup for each object is stored in the slab page's vector.
+	 */
+	if (page_objcgs_check(page)) {
+		struct obj_cgroup *objcg;
+		unsigned int off;
+
+		off = obj_to_index(page->slab_cache, page, p);
+		objcg = page_objcgs(page)[off];
+		if (objcg)
+			return obj_cgroup_memcg(objcg);
+
+		return NULL;
+	}
+
 	return page_memcg_check(page);
 }
 
@@ -2621,10 +2638,7 @@ static int memcg_alloc_cache_id(void)
 	if (id < memcg_nr_cache_ids)
 		return id;
 
-	/*
-	 * There's no space for the new id in memcg_caches arrays,
-	 * so we have to grow them.
-	 */
+	/* Grow memcg-aware list_lru arrays to cover the new id. */
 	down_write(&memcg_cache_ids_sem);
 
 	size = 2 * (id + 1);
@@ -2633,9 +2647,7 @@ static int memcg_alloc_cache_id(void)
 	else if (size > MEMCG_CACHES_MAX_SIZE)
 		size = MEMCG_CACHES_MAX_SIZE;
 
-	err = memcg_update_all_caches(size);
-	if (!err)
-		err = memcg_update_all_list_lrus(size);
+	err = memcg_update_all_list_lrus(size);
 	if (!err)
 		memcg_nr_cache_ids = size;
 
@@ -2654,7 +2666,6 @@ static void memcg_free_cache_id(int id)
 }
 
 struct memcg_kmem_cache_create_work {
-	struct mem_cgroup *memcg;
 	struct kmem_cache *cachep;
 	struct work_struct work;
 };
@@ -2663,20 +2674,17 @@ static void memcg_kmem_cache_create_func(struct work_struct *w)
 {
 	struct memcg_kmem_cache_create_work *cw =
 		container_of(w, struct memcg_kmem_cache_create_work, work);
-	struct mem_cgroup *memcg = cw->memcg;
 	struct kmem_cache *cachep = cw->cachep;
 
-	memcg_create_kmem_cache(memcg, cachep);
+	memcg_create_kmem_cache(cachep);
 
-	css_put(&memcg->css);
 	kfree(cw);
 }
 
 /*
  * Enqueue the creation of a per-memcg kmem_cache.
  */
-static void __memcg_schedule_kmem_cache_create(struct mem_cgroup *memcg,
-					       struct kmem_cache *cachep)
+static void memcg_schedule_kmem_cache_create(struct kmem_cache *cachep)
 {
 	struct memcg_kmem_cache_create_work *cw;
 
@@ -2684,111 +2692,33 @@ static void __memcg_schedule_kmem_cache_create(struct mem_cgroup *memcg,
 	if (!cw)
 		return;
 
-	css_get(&memcg->css);
-
-	cw->memcg = memcg;
 	cw->cachep = cachep;
 	INIT_WORK(&cw->work, memcg_kmem_cache_create_func);
 
 	queue_work(memcg_kmem_cache_wq, &cw->work);
 }
 
-static void memcg_schedule_kmem_cache_create(struct mem_cgroup *memcg,
-					     struct kmem_cache *cachep)
-{
-	/*
-	 * We need to stop accounting when we kmalloc, because if the
-	 * corresponding kmalloc cache is not yet created, the first allocation
-	 * in __memcg_schedule_kmem_cache_create will recurse.
-	 *
-	 * However, it is better to enclose the whole function. Depending on
-	 * the debugging options enabled, INIT_WORK(), for instance, can
-	 * trigger an allocation. This too, will make us recurse. Because at
-	 * this point we can't allow ourselves back into memcg_kmem_get_cache,
-	 * the safest choice is to do it like this, wrapping the whole function.
-	 */
-	current->memcg_kmem_skip_account = 1;
-	__memcg_schedule_kmem_cache_create(memcg, cachep);
-	current->memcg_kmem_skip_account = 0;
-}
-
 /**
- * memcg_kmem_get_cache: select the correct per-memcg cache for allocation
+ * memcg_kmem_get_cache: select memcg or root cache for allocation
  * @cachep: the original global kmem cache
  *
  * Return the kmem_cache we're supposed to use for a slab allocation.
- * We try to use the current memcg's version of the cache.
  *
  * If the cache does not exist yet, if we are the first user of it, we
  * create it asynchronously in a workqueue and let the current allocation
  * go through with the original cache.
- *
- * This function takes a reference to the cache it returns to assure it
- * won't get destroyed while we are working with it. Once the caller is
- * done with it, memcg_kmem_put_cache() must be called to release the
- * reference.
  */
-struct kmem_cache *memcg_kmem_get_cache(struct kmem_cache *cachep,
-					struct obj_cgroup **objcgp)
+struct kmem_cache *memcg_kmem_get_cache(struct kmem_cache *cachep)
 {
-	struct mem_cgroup *memcg;
 	struct kmem_cache *memcg_cachep;
-	int kmemcg_id;
 
-	VM_BUG_ON(!is_root_cache(cachep));
-
-	if (memcg_kmem_bypass())
+	memcg_cachep = READ_ONCE(cachep->memcg_params.memcg_cache);
+	if (unlikely(!memcg_cachep)) {
+		memcg_schedule_kmem_cache_create(cachep);
 		return cachep;
-
-	if (current->memcg_kmem_skip_account)
-		return cachep;
-
-	memcg = get_mem_cgroup_from_current();
-	kmemcg_id = READ_ONCE(memcg->kmemcg_id);
-	if (kmemcg_id < 0)
-		goto out;
-
-	memcg_cachep = cache_from_memcg_idx(cachep, kmemcg_id);
-	if (likely(memcg_cachep)) {
-		struct obj_cgroup *objcg;
-
-		rcu_read_lock();
-		objcg = rcu_dereference(memcg->objcg);
-		if (objcg && obj_cgroup_tryget(objcg)) {
-			*objcgp = objcg;
-			rcu_read_unlock();
-			return memcg_cachep;
-		}
-		rcu_read_unlock();
-		goto out;
 	}
 
-	/*
-	 * If we are in a safe context (can wait, and not in interrupt
-	 * context), we could be be predictable and return right away.
-	 * This would guarantee that the allocation being performed
-	 * already belongs in the new cache.
-	 *
-	 * However, there are some clashes that can arrive from locking.
-	 * For instance, because we acquire the slab_mutex while doing
-	 * memcg_create_kmem_cache, this means no further allocation
-	 * could happen with the slab_mutex held. So it's better to
-	 * defer everything.
-	 */
-	memcg_schedule_kmem_cache_create(memcg, cachep);
-out:
-	css_put(&memcg->css);
-	return cachep;
-}
-
-/**
- * memcg_kmem_put_cache: drop reference taken by memcg_kmem_get_cache
- * @cachep: the cache returned by memcg_kmem_get_cache
- */
-void memcg_kmem_put_cache(struct kmem_cache *cachep)
-{
-	if (!is_root_cache(cachep))
-		css_put(&cachep->memcg_params.memcg->css);
+	return memcg_cachep;
 }
 
 /**
@@ -3468,7 +3398,6 @@ static int memcg_online_kmem(struct mem_cgroup *memcg)
 	 */
 	memcg->kmemcg_id = memcg_id;
 	memcg->kmem_state = KMEM_ONLINE;
-	INIT_LIST_HEAD(&memcg->kmem_caches);
 
 	return 0;
 }
@@ -3481,15 +3410,9 @@ static void memcg_offline_kmem(struct mem_cgroup *memcg)
 
 	if (memcg->kmem_state != KMEM_ONLINE)
 		return;
-	/*
-	 * Clear the online state before clearing memcg_caches array
-	 * entries. The slab_mutex in memcg_deactivate_kmem_caches()
-	 * guarantees that no cache will be created for this cgroup
-	 * after we are done (see memcg_create_kmem_cache()).
-	 */
+
 	memcg->kmem_state = KMEM_ALLOCATED;
 
-	memcg_deactivate_kmem_caches(memcg);
 
 	kmemcg_id = memcg->kmemcg_id;
 	BUG_ON(kmemcg_id < 0);
@@ -4669,12 +4592,10 @@ static struct cftype mem_cgroup_legacy_files[] = {
 		.write = mem_cgroup_reset,
 		.read_u64 = mem_cgroup_read_u64,
 	},
-#if defined(CONFIG_SLAB) || defined(CONFIG_SLUB_DEBUG)
+#if defined(CONFIG_MEMCG_KMEM) && \
+	(defined(CONFIG_SLAB) || defined(CONFIG_SLUB_DEBUG))
 	{
 		.name = "kmem.slabinfo",
-		.seq_start = memcg_slab_start,
-		.seq_next = memcg_slab_next,
-		.seq_stop = memcg_slab_stop,
 		.seq_show = memcg_slab_show,
 	},
 #endif
