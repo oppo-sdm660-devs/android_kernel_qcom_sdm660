@@ -2566,6 +2566,24 @@ static void commit_charge(struct page *page, struct mem_cgroup *memcg,
 }
 
 #ifdef CONFIG_MEMCG_KMEM
+int memcg_alloc_page_obj_cgroups(struct page *page, struct kmem_cache *s,
+				 gfp_t gfp)
+{
+	unsigned int objects = objs_per_slab_page(s, page);
+	struct obj_cgroup **vec;
+
+	vec = kcalloc_node(objects, sizeof(*vec), gfp, page_to_nid(page));
+	if (!vec)
+		return -ENOMEM;
+
+	if (!set_page_objcgs(page, vec))
+		kfree(vec);
+	else
+		kmemleak_not_leak(vec);
+
+	return 0;
+}
+
 /*
  * Returns a pointer to the memory cgroup to which the kernel object is charged.
  *
