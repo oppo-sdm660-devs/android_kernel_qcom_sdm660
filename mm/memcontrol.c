@@ -2600,6 +2600,15 @@ struct mem_cgroup *mem_cgroup_from_obj(void *p)
 	page = virt_to_head_page(p);
 
 	/*
+	 * If page->memcg_data is set, it's either a simple memcg pointer
+	 * (possibly with flags) or an obj_cgroup vector.  The value can be
+	 * changed asynchronously from zero to an objcg vector, but it cannot
+	 * change from a valid memcg pointer to an objcg vector or back.
+	 */
+	if (!READ_ONCE(page->memcg_data))
+		return NULL;
+
+	/*
 	 * Slab objects are accounted individually, not per-page.  The object
 	 * cgroup for each object is stored in the slab page's vector.
 	 */
