@@ -1399,16 +1399,33 @@ static inline bool memcg_kmem_enabled(void)
 	return static_branch_unlikely(&memcg_kmem_enabled_key);
 }
 
-static inline bool memcg_kmem_bypass(void)
+static inline int memcg_kmem_charge_page(struct page *page, gfp_t gfp,
+					 int order)
 {
-	if (in_interrupt())
-		return true;
+	if (memcg_kmem_enabled())
+		return __memcg_kmem_charge_page(page, gfp, order);
+	return 0;
+}
 
-	/* Allow remote memcg charging in kthread contexts. */
-	if ((!current->mm || (current->flags & PF_KTHREAD)) &&
-	    !current->active_memcg)
-		return true;
-	return false;
+static inline void memcg_kmem_uncharge_page(struct page *page, int order)
+{
+	if (memcg_kmem_enabled())
+		__memcg_kmem_uncharge_page(page, order);
+}
+
+static inline int memcg_kmem_charge(struct mem_cgroup *memcg, gfp_t gfp,
+				    unsigned int nr_pages)
+{
+	if (memcg_kmem_enabled())
+		return __memcg_kmem_charge(memcg, gfp, nr_pages);
+	return 0;
+}
+
+static inline void memcg_kmem_uncharge(struct mem_cgroup *memcg,
+				       unsigned int nr_pages)
+{
+	if (memcg_kmem_enabled())
+		__memcg_kmem_uncharge(memcg, nr_pages);
 }
 
 /*
