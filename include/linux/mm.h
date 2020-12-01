@@ -1276,13 +1276,7 @@ static inline void set_page_links(struct page *page, enum zone_type zone,
 }
 
 #ifdef CONFIG_MEMCG
-/*
- * Bits stored in page->memcg_data in addition to the memcg pointer.
- *
- * The object-cgroup bit is reserved for compatibility with newer memcg
- * implementations.  This 4.19 tree still keeps slab charges at page level,
- * so page_memcg() remains valid for slab pages as well.
- */
+/* Bits stored in page->memcg_data in addition to the pointer. */
 enum page_memcg_data_flags {
 	/* page->memcg_data is a pointer to an object cgroups vector */
 	MEMCG_DATA_OBJCGS = (1UL << 0),
@@ -1294,19 +1288,37 @@ enum page_memcg_data_flags {
 
 #define MEMCG_DATA_FLAGS_MASK (__NR_MEMCG_DATA_FLAGS - 1)
 
+#ifdef CONFIG_MEMCG_KMEM
+struct mem_cgroup *obj_cgroup_memcg(struct obj_cgroup *objcg);
+#endif
+
+
+/*
+ * page_memcg - get the memory cgroup associated with a page.
+ *
+ * This helper assumes that the page has a direct memcg pointer. It is not
+ * safe for slab pages or ex-slab pages carrying an objcgs vector.
+ */
 static inline struct mem_cgroup *page_memcg(struct page *page)
 {
-	return (struct mem_cgroup *)(page->memcg_data &
-			     ~MEMCG_DATA_FLAGS_MASK);
+	unsigned long memcg_data = READ_ONCE(page->memcg_data);
+
+	VM_BUG_ON_PAGE(PageSlab(page), page);
+	VM_BUG_ON_PAGE(memcg_data & MEMCG_DATA_OBJCGS, page);
+
+	return (struct mem_cgroup *)(memcg_data & ~MEMCG_DATA_FLAGS_MASK);
 }
 
 static inline struct mem_cgroup *page_memcg_rcu(struct page *page)
 {
+	VM_BUG_ON_PAGE(PageSlab(page), page);
 	WARN_ON_ONCE(!rcu_read_lock_held());
+
 	return (struct mem_cgroup *)(READ_ONCE(page->memcg_data) &
-			     ~MEMCG_DATA_FLAGS_MASK);
+				     ~MEMCG_DATA_FLAGS_MASK);
 }
 
+/* Safe for pages which may carry an objcgs vector. */
 static inline struct mem_cgroup *page_memcg_check(struct page *page)
 {
 	unsigned long memcg_data = READ_ONCE(page->memcg_data);
@@ -1314,14 +1326,57 @@ static inline struct mem_cgroup *page_memcg_check(struct page *page)
 	if (memcg_data & MEMCG_DATA_OBJCGS)
 		return NULL;
 
-	return (struct mem_cgroup *)(memcg_data &
-			     ~MEMCG_DATA_FLAGS_MASK);
+	return (struct mem_cgroup *)(memcg_data & ~MEMCG_DATA_FLAGS_MASK);
 }
 
 static inline bool PageMemcgKmem(struct page *page)
 {
-	return page->memcg_data & MEMCG_DATA_KMEM;
+	VM_BUG_ON_PAGE(READ_ONCE(page->memcg_data) & MEMCG_DATA_OBJCGS, page);
+	return READ_ONCE(page->memcg_data) & MEMCG_DATA_KMEM;
 }
+
+#ifdef CONFIG_MEMCG_KMEM
+static inline struct obj_cgroup **page_objcgs(struct page *page)
+{
+	unsigned long memcg_data = READ_ONCE(page->memcg_data);
+
+	VM_BUG_ON_PAGE(memcg_data && !(memcg_data & MEMCG_DATA_OBJCGS), page);
+	VM_BUG_ON_PAGE(memcg_data & MEMCG_DATA_KMEM, page);
+	return (struct obj_cgroup **)(memcg_data & ~MEMCG_DATA_FLAGS_MASK);
+}
+
+static inline struct obj_cgroup **page_objcgs_check(struct page *page)
+{
+	unsigned long memcg_data = READ_ONCE(page->memcg_data);
+
+	if (!memcg_data || !(memcg_data & MEMCG_DATA_OBJCGS))
+		return NULL;
+	VM_BUG_ON_PAGE(memcg_data & MEMCG_DATA_KMEM, page);
+	return (struct obj_cgroup **)(memcg_data & ~MEMCG_DATA_FLAGS_MASK);
+}
+
+static inline bool set_page_objcgs(struct page *page,
+				    struct obj_cgroup **objcgs)
+{
+	return !cmpxchg(&page->memcg_data, 0,
+			(unsigned long)objcgs | MEMCG_DATA_OBJCGS);
+}
+#else
+static inline struct obj_cgroup **page_objcgs(struct page *page)
+{
+	return NULL;
+}
+static inline struct obj_cgroup **page_objcgs_check(struct page *page)
+{
+	return NULL;
+}
+
+static inline bool set_page_objcgs(struct page *page,
+				    struct obj_cgroup **objcgs)
+{
+	return true;
+}
+#endif
 #else
 static inline struct mem_cgroup *page_memcg(struct page *page)
 {
@@ -1339,6 +1394,14 @@ static inline struct mem_cgroup *page_memcg_check(struct page *page)
 static inline bool PageMemcgKmem(struct page *page)
 {
 	return false;
+}
+static inline struct obj_cgroup **page_objcgs(struct page *page)
+{
+	return NULL;
+}
+static inline struct obj_cgroup **page_objcgs_check(struct page *page)
+{
+	return NULL;
 }
 #endif
 
