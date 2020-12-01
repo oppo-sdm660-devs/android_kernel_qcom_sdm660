@@ -1276,14 +1276,42 @@ static inline void set_page_links(struct page *page, enum zone_type zone,
 }
 
 #ifdef CONFIG_MEMCG
+/*
+ * Bits stored in page->memcg_data in addition to the memcg pointer.
+ *
+ * The object-cgroup bit is reserved for compatibility with newer memcg
+ * implementations.  This 4.19 tree still keeps slab charges at page level,
+ * so page_memcg() remains valid for slab pages as well.
+ */
+enum page_memcg_data_flags {
+	MEMCG_DATA_OBJCGS = (1UL << 0),
+	__NR_MEMCG_DATA_FLAGS = (1UL << 1),
+};
+
+#define MEMCG_DATA_FLAGS_MASK (__NR_MEMCG_DATA_FLAGS - 1)
+
 static inline struct mem_cgroup *page_memcg(struct page *page)
 {
-	return page->mem_cgroup;
+	return (struct mem_cgroup *)(page->memcg_data &
+			     ~MEMCG_DATA_FLAGS_MASK);
 }
+
 static inline struct mem_cgroup *page_memcg_rcu(struct page *page)
 {
 	WARN_ON_ONCE(!rcu_read_lock_held());
-	return READ_ONCE(page->mem_cgroup);
+	return (struct mem_cgroup *)(READ_ONCE(page->memcg_data) &
+			     ~MEMCG_DATA_FLAGS_MASK);
+}
+
+static inline struct mem_cgroup *page_memcg_check(struct page *page)
+{
+	unsigned long memcg_data = READ_ONCE(page->memcg_data);
+
+	if (memcg_data & MEMCG_DATA_OBJCGS)
+		return NULL;
+
+	return (struct mem_cgroup *)(memcg_data &
+			     ~MEMCG_DATA_FLAGS_MASK);
 }
 #else
 static inline struct mem_cgroup *page_memcg(struct page *page)
@@ -1293,6 +1321,10 @@ static inline struct mem_cgroup *page_memcg(struct page *page)
 static inline struct mem_cgroup *page_memcg_rcu(struct page *page)
 {
 	WARN_ON_ONCE(!rcu_read_lock_held());
+	return NULL;
+}
+static inline struct mem_cgroup *page_memcg_check(struct page *page)
+{
 	return NULL;
 }
 #endif
