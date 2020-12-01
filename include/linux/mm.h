@@ -1284,8 +1284,12 @@ static inline void set_page_links(struct page *page, enum zone_type zone,
  * so page_memcg() remains valid for slab pages as well.
  */
 enum page_memcg_data_flags {
+	/* page->memcg_data is a pointer to an object cgroups vector */
 	MEMCG_DATA_OBJCGS = (1UL << 0),
-	__NR_MEMCG_DATA_FLAGS = (1UL << 1),
+	/* page has been accounted as a non-slab kernel page */
+	MEMCG_DATA_KMEM = (1UL << 1),
+	/* the next bit after the last actual flag */
+	__NR_MEMCG_DATA_FLAGS = (1UL << 2),
 };
 
 #define MEMCG_DATA_FLAGS_MASK (__NR_MEMCG_DATA_FLAGS - 1)
