@@ -1317,6 +1317,11 @@ static inline struct mem_cgroup *page_memcg_check(struct page *page)
 	return (struct mem_cgroup *)(memcg_data &
 			     ~MEMCG_DATA_FLAGS_MASK);
 }
+
+static inline bool PageMemcgKmem(struct page *page)
+{
+	return page->memcg_data & MEMCG_DATA_KMEM;
+}
 #else
 static inline struct mem_cgroup *page_memcg(struct page *page)
 {
@@ -1330,6 +1335,10 @@ static inline struct mem_cgroup *page_memcg_rcu(struct page *page)
 static inline struct mem_cgroup *page_memcg_check(struct page *page)
 {
 	return NULL;
+}
+static inline bool PageMemcgKmem(struct page *page)
+{
+	return false;
 }
 #endif
 
