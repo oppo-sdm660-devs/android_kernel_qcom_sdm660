@@ -2609,7 +2609,7 @@ static void commit_charge(struct page *page, struct mem_cgroup *memcg,
 
 #ifdef CONFIG_MEMCG_KMEM
 int memcg_alloc_page_obj_cgroups(struct page *page, struct kmem_cache *s,
-				 gfp_t gfp)
+				 gfp_t gfp, bool new_page)
 {
 	unsigned int objects = objs_per_slab_page(s, page);
 	struct obj_cgroup **vec;
@@ -2618,11 +2618,16 @@ int memcg_alloc_page_obj_cgroups(struct page *page, struct kmem_cache *s,
 	if (!vec)
 		return -ENOMEM;
 
-	if (!set_page_objcgs(page, vec))
+	if (new_page) {
+		/* The new slab page is not visible yet, so no atomic publish is needed. */
+		page->memcg_data = (unsigned long)vec | MEMCG_DATA_OBJCGS;
+	} else if (!set_page_objcgs(page, vec)) {
+		/* Another allocator installed the vector while this one was allocating. */
 		kfree(vec);
-	else
-		kmemleak_not_leak(vec);
+		return 0;
+	}
 
+	kmemleak_not_leak(vec);
 	return 0;
 }
 

@@ -222,7 +222,7 @@ static inline bool page_has_obj_cgroups(struct page *page)
 }
 
 int memcg_alloc_page_obj_cgroups(struct page *page, struct kmem_cache *s,
-				 gfp_t gfp);
+				 gfp_t gfp, bool new_page);
 
 static inline void memcg_free_page_obj_cgroups(struct page *page)
 {
@@ -305,7 +305,7 @@ static inline void memcg_slab_post_alloc_hook(struct kmem_cache *s,
 			page = virt_to_head_page(p[i]);
 
 			if (!page_has_obj_cgroups(page) &&
-			    memcg_alloc_page_obj_cgroups(page, s, flags)) {
+			    memcg_alloc_page_obj_cgroups(page, s, flags, false)) {
 				obj_cgroup_uncharge(objcg, obj_full_size(s));
 				continue;
 			}
@@ -372,7 +372,8 @@ static inline struct mem_cgroup *memcg_from_slab_obj(void *ptr)
 }
 
 static inline int memcg_alloc_page_obj_cgroups(struct page *page,
-					       struct kmem_cache *s, gfp_t gfp)
+					       struct kmem_cache *s, gfp_t gfp,
+					       bool new_page)
 {
 	return 0;
 }
@@ -412,16 +413,18 @@ static inline struct kmem_cache *virt_to_cache(const void *obj)
 	return page->slab_cache;
 }
 
-static __always_inline void charge_slab_page(struct page *page,
-					     gfp_t gfp, int order,
-					     struct kmem_cache *s)
+static __always_inline void account_slab_page(struct page *page, int order,
+					      struct kmem_cache *s, gfp_t gfp)
 {
+	if (memcg_kmem_enabled() && (s->flags & SLAB_ACCOUNT))
+		memcg_alloc_page_obj_cgroups(page, s, gfp, true);
+
 	mod_node_page_state(page_pgdat(page), cache_vmstat_idx(s),
 			    PAGE_SIZE << order);
 }
 
-static __always_inline void uncharge_slab_page(struct page *page, int order,
-					       struct kmem_cache *s)
+static __always_inline void unaccount_slab_page(struct page *page, int order,
+						struct kmem_cache *s)
 {
 	if (memcg_kmem_enabled())
 		memcg_free_page_obj_cgroups(page);
