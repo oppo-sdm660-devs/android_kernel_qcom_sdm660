@@ -2740,19 +2740,13 @@ static __always_inline void *slab_alloc_node(struct kmem_cache *s,
 	struct kmem_cache_cpu *c;
 	struct page *page;
 	unsigned long tid;
-	struct kmem_cache *root_s = s;
 	struct obj_cgroup *objcg = NULL;
 
 	s = slab_pre_alloc_hook(s, &objcg, 1, gfpflags);
 	if (!s)
 		return NULL;
 
-	/*
-	 * 5.4 note: passing in original cachep to avoid problems with memcg
-	 * accounting. Making KFENCE properly work with memcgs on older kernels
-	 * is not worth the effort.
-	 */
-	object = kfence_alloc(root_s, orig_size, gfpflags);
+	object = kfence_alloc(s, orig_size, gfpflags);
 	if (unlikely(object))
 		goto out;
 
@@ -3113,6 +3107,18 @@ struct detached_freelist {
 	struct kmem_cache *s;
 };
 
+static inline void free_nonslab_page(struct page *page)
+{
+	unsigned int order = compound_order(page);
+
+	VM_BUG_ON_PAGE(!PageCompound(page), page);
+	kfree_hook(page_address(page));
+	mod_lruvec_page_state(page, NR_SLAB_UNRECLAIMABLE_B,
+			      -(PAGE_SIZE << order));
+	kasan_alloc_pages(page, order);
+	__free_pages(page, order);
+}
+
 /*
  * This function progressively scans the array with free objects (with
  * a limited look ahead) and extract objects belonging to the same
@@ -3149,9 +3155,7 @@ int build_detached_freelist(struct kmem_cache *s, size_t size,
 	if (!s) {
 		/* Handle kalloc'ed objects */
 		if (unlikely(!PageSlab(page))) {
-			BUG_ON(!PageCompound(page));
-			kfree_hook(object);
-			__free_pages(page, compound_order(page));
+			free_nonslab_page(page);
 			p[size] = NULL; /* mark object processed */
 			return size;
 		}
@@ -3228,7 +3232,6 @@ int kmem_cache_alloc_bulk(struct kmem_cache *s, gfp_t flags, size_t size,
 {
 	struct kmem_cache_cpu *c;
 	int i;
-	struct kmem_cache *root_s = s;
 	struct obj_cgroup *objcg = NULL;
 
 	/* memcg and kmem_cache debug support */
@@ -3244,12 +3247,7 @@ int kmem_cache_alloc_bulk(struct kmem_cache *s, gfp_t flags, size_t size,
 	c = this_cpu_ptr(s->cpu_slab);
 
 	for (i = 0; i < size; i++) {
-		/*
-		 * 5.4 note: passing in original cachep to avoid problems with memcg
-		 * accounting. Making KFENCE properly work with memcgs on older kernels
-		 * is not worth the effort.
-		 */
-		void *object = kfence_alloc(root_s, s->object_size, flags);
+		void *object = kfence_alloc(s, s->object_size, flags);
 
 		if (unlikely(object)) {
 			p[i] = object;
@@ -3301,6 +3299,7 @@ int kmem_cache_alloc_bulk(struct kmem_cache *s, gfp_t flags, size_t size,
 	return i;
 error:
 	local_irq_enable();
+	memcg_slab_alloc_error_hook(s, objcg, size - i);
 	slab_post_alloc_hook(s, objcg, flags, i, p);
 	__kmem_cache_free_bulk(s, i, p);
 	return 0;
