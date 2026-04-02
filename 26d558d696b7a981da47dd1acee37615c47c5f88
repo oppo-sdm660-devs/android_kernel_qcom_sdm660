@@ -16,6 +16,24 @@
       "message": "upload to sm8250 too.",
       "revId": "26d558d696b7a981da47dd1acee37615c47c5f88",
       "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "db49c307_038bd780",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 2
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 33118
+      },
+      "writtenOn": "2026-04-02T20:41:05Z",
+      "side": 1,
+      "message": "https://review.lineageos.org/c/LineageOS/android_kernel_qcom_sm8250/+/479619\n\nDone!",
+      "parentUuid": "c738cc06_ed5d13eb",
+      "revId": "26d558d696b7a981da47dd1acee37615c47c5f88",
+      "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
     }
   ]
 }
