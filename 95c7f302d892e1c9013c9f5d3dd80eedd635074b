@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "f6c793bf_d7f10146",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 1
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 29715
+      },
+      "writtenOn": "2026-05-04T05:16:13Z",
+      "side": 1,
+      "message": "Why not c25 ?\nIt has the same commit (same change, different author) + this one : https://git.codelinaro.org/clo/la/kernel/msm-4.19/-/commit/8ddfd9d77c0151923eccce482d8d1bd0dd5eb55e",
+      "revId": "95c7f302d892e1c9013c9f5d3dd80eedd635074b",
+      "serverId": "1ec6b3db-b2c1-4fa4-84a2-4c7efe89ba71"
+    }
+  ]
+}
