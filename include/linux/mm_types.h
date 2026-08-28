@@ -26,6 +26,7 @@
 
 struct address_space;
 struct mem_cgroup;
+struct obj_cgroup;
 struct hmm;
 
 /*

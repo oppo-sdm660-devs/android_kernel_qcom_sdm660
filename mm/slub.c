@@ -1724,6 +1724,7 @@ out:
 	if (!page)
 		return NULL;
 
+
 	inc_slabs_node(s, page_to_nid(page), page->objects);
 
 	return page;
@@ -3034,7 +3035,9 @@ static __always_inline void do_slab_free(struct kmem_cache *s,
 	struct kmem_cache_cpu *c;
 	unsigned long tid;
 
-	memcg_slab_free_hook(s, &head, 1);
+	/* memcg_slab_free_hook() is already called for bulk free. */
+	if (!tail)
+		memcg_slab_free_hook(s, &head, 1);
 redo:
 	/*
 	 * Determine the currently cpus per cpu slab.
@@ -3214,6 +3217,7 @@ void kmem_cache_free_bulk(struct kmem_cache *s, size_t size, void **p)
 		return;
 
 	memcg_slab_free_hook(s, p, size);
+
 	do {
 		struct detached_freelist df;
 
@@ -3931,8 +3935,11 @@ static void *kmalloc_large_node(size_t size, gfp_t flags, int node)
 
 	flags |= __GFP_COMP;
 	page = alloc_pages_node(node, flags, get_order(size));
-	if (page)
+	if (page) {
 		ptr = page_address(page);
+		mod_lruvec_page_state(page, NR_SLAB_UNRECLAIMABLE_B,
+				      PAGE_SIZE << get_order(size));
+	}
 
 	return kmalloc_large_node_hook(ptr, size, flags);
 }
@@ -4146,6 +4153,7 @@ int __kmem_cache_shrink(struct kmem_cache *s)
 
 	return ret;
 }
+
 
 static int slab_mem_going_offline_callback(void *arg)
 {
@@ -4368,6 +4376,7 @@ __kmem_cache_alias(const char *name, unsigned int size, unsigned int align,
 		 */
 		s->object_size = max(s->object_size, size);
 		s->inuse = max(s->inuse, ALIGN(size, sizeof(void *)));
+
 
 		if (sysfs_slab_alias(s, name)) {
 			s->refcount--;
@@ -5619,8 +5628,10 @@ static ssize_t slab_attr_store(struct kobject *kobj,
 		return -EIO;
 
 	err = attribute->store(s, buf, len);
+
 	return err;
 }
+
 
 static void kmem_cache_release(struct kobject *k)
 {
@@ -5697,12 +5708,14 @@ static char *create_unique_id(struct kmem_cache *s)
 	return name;
 }
 
+
 static int sysfs_slab_add(struct kmem_cache *s)
 {
 	int err;
 	const char *name;
 	struct kset *kset = cache_kset(s);
 	int unmergeable = slab_unmergeable(s);
+
 
 	if (!kset) {
 		kobject_init(&s->kobj, &slab_ktype);
@@ -5740,6 +5753,8 @@ static int sysfs_slab_add(struct kmem_cache *s)
 	if (err)
 		goto out_del_kobj;
 
+
+	kobject_uevent(&s->kobj, KOBJ_ADD);
 	if (!unmergeable) {
 		/* Setup first alias */
 		sysfs_slab_alias(s, s->name);
@@ -5752,6 +5767,7 @@ out_del_kobj:
 	kobject_del(&s->kobj);
 	goto out;
 }
+
 
 void sysfs_slab_unlink(struct kmem_cache *s)
 {

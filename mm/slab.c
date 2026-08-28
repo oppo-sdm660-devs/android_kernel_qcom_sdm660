@@ -1396,6 +1396,7 @@ static struct page *kmem_getpages(struct kmem_cache *cachep, gfp_t flags,
 	}
 
 	account_slab_page(page, cachep->gfporder, cachep, flags);
+
 	__SetPageSlab(page);
 	/* Record if ALLOC_NO_WATERMARKS was set when allocating the slab */
 	if (sk_memalloc_socks() && page_is_pfmemalloc(page))
@@ -1410,6 +1411,8 @@ static struct page *kmem_getpages(struct kmem_cache *cachep, gfp_t flags,
 static void kmem_freepages(struct kmem_cache *cachep, struct page *page)
 {
 	int order = cachep->gfporder;
+	unsigned long nr_freed = (1 << order);
+
 
 	BUG_ON(!PageSlab(page));
 	__ClearPageSlabPfmemalloc(page);
@@ -1418,7 +1421,7 @@ static void kmem_freepages(struct kmem_cache *cachep, struct page *page)
 	page->mapping = NULL;
 
 	if (current->reclaim_state)
-		current->reclaim_state->reclaimed_slab += 1 << order;
+		current->reclaim_state->reclaimed_slab += nr_freed;
 	unaccount_slab_page(page, order, cachep);
 	__free_pages(page, order);
 }
@@ -2295,6 +2298,7 @@ int __kmem_cache_shrink(struct kmem_cache *cachep)
 	}
 	return (ret ? 1 : 0);
 }
+
 
 int __kmem_cache_shutdown(struct kmem_cache *cachep)
 {
@@ -3270,7 +3274,6 @@ slab_alloc_node(struct kmem_cache *cachep, gfp_t flags, int nodeid, size_t orig_
 	unsigned long save_flags;
 	void *ptr;
 	int slab_node = numa_mem_id();
-	struct kmem_cache *orig_cachep = cachep;
 	struct obj_cgroup *objcg = NULL;
 
 	flags &= gfp_allowed_mask;
@@ -3278,12 +3281,7 @@ slab_alloc_node(struct kmem_cache *cachep, gfp_t flags, int nodeid, size_t orig_
 	if (unlikely(!cachep))
 		return NULL;
 
-	/*
-	 * 5.4 note: passing in original cachep to avoid problems with memcg
-	 * accounting. Making KFENCE properly work with memcgs on older kernels
-	 * is not worth the effort.
-	 */
-	ptr = kfence_alloc(orig_cachep, orig_size, flags);
+	ptr = kfence_alloc(cachep, orig_size, flags);
 	if (unlikely(ptr))
 		goto out_hooks;
 
@@ -3361,7 +3359,6 @@ slab_alloc(struct kmem_cache *cachep, gfp_t flags, size_t orig_size, unsigned lo
 {
 	unsigned long save_flags;
 	void *objp;
-	struct kmem_cache *orig_cachep = cachep;
 	struct obj_cgroup *objcg = NULL;
 
 	flags &= gfp_allowed_mask;
@@ -3369,12 +3366,7 @@ slab_alloc(struct kmem_cache *cachep, gfp_t flags, size_t orig_size, unsigned lo
 	if (unlikely(!cachep))
 		return NULL;
 
-	/*
-	 * 5.4 note: passing in original cachep to avoid problems with memcg
-	 * accounting. Making KFENCE properly work with memcgs on older kernels
-	 * is not worth the effort.
-	 */
-	objp = kfence_alloc(orig_cachep, orig_size, flags);
+	objp = kfence_alloc(cachep, orig_size, flags);
 	if (unlikely(objp))
 		goto out;
 
@@ -3496,6 +3488,7 @@ static __always_inline void __cache_free(struct kmem_cache *cachep, void *objp,
 {
 	if (is_kfence_address(objp)) {
 		kmemleak_free_recursive(objp, cachep->flags);
+		memcg_slab_free_hook(cachep, &objp, 1);
 		__kfence_free(objp);
 		return;
 	}
@@ -3582,7 +3575,6 @@ int kmem_cache_alloc_bulk(struct kmem_cache *s, gfp_t flags, size_t size,
 			  void **p)
 {
 	size_t i;
-	struct kmem_cache *root_s = s;
 	struct obj_cgroup *objcg = NULL;
 
 	s = slab_pre_alloc_hook(s, &objcg, size, flags);
@@ -3593,12 +3585,7 @@ int kmem_cache_alloc_bulk(struct kmem_cache *s, gfp_t flags, size_t size,
 
 	local_irq_disable();
 	for (i = 0; i < size; i++) {
-		/*
-		 * 5.4 note: passing in original cachep to avoid problems with
-		 * memcg accounting. Making KFENCE properly work with memcgs on
-		 * older kernels is not worth the effort.
-		 */
-		void *objp = kfence_alloc(root_s, s->object_size, flags) ?:
+		void *objp = kfence_alloc(s, s->object_size, flags) ?:
 					  __do_cache_alloc(s, flags);
 
 		if (unlikely(!objp))
@@ -3620,6 +3607,7 @@ int kmem_cache_alloc_bulk(struct kmem_cache *s, gfp_t flags, size_t size,
 error:
 	local_irq_enable();
 	cache_alloc_debugcheck_after_bulk(s, flags, i, p, _RET_IP_);
+	memcg_slab_alloc_error_hook(s, objcg, size - i);
 	slab_post_alloc_hook(s, objcg, flags, i, p);
 	__kmem_cache_free_bulk(s, i, p);
 	return 0;
@@ -3754,6 +3742,19 @@ void *__kmalloc_track_caller(size_t size, gfp_t flags, unsigned long caller)
 }
 EXPORT_SYMBOL(__kmalloc_track_caller);
 
+static inline void free_nonslab_page(struct page *page, void *object)
+{
+	unsigned int order = compound_order(page);
+
+	VM_BUG_ON_PAGE(!PageCompound(page), page);
+	kmemleak_free(object);
+	kasan_kfree_large(object, _RET_IP_);
+	mod_lruvec_page_state(page, NR_SLAB_UNRECLAIMABLE_B,
+			      -(PAGE_SIZE << order));
+	kasan_alloc_pages(page, order);
+	__free_pages(page, order);
+}
+
 /**
  * kmem_cache_free - Deallocate an object
  * @cachep: The cache the allocation was from.
@@ -3789,10 +3790,17 @@ void kmem_cache_free_bulk(struct kmem_cache *orig_s, size_t size, void **p)
 	for (i = 0; i < size; i++) {
 		void *objp = p[i];
 
-		if (!orig_s) /* called via kfree_bulk */
-			s = virt_to_cache(objp);
-		else
+		if (!orig_s) { /* called via kfree_bulk */
+			struct page *page = virt_to_head_page(objp);
+
+			if (unlikely(!PageSlab(page))) {
+				free_nonslab_page(page, objp);
+				continue;
+			}
+			s = page->slab_cache;
+		} else {
 			s = cache_from_obj(orig_s, objp);
+		}
 		if (!s)
 			continue;
 
@@ -3828,6 +3836,11 @@ void kfree(const void *objp)
 		return;
 	local_irq_save(flags);
 	kfree_debugcheck(objp);
+	if (unlikely(!PageSlab(virt_to_head_page(objp)))) {
+		free_nonslab_page(virt_to_head_page(objp), (void *)objp);
+		local_irq_restore(flags);
+		return;
+	}
 	c = virt_to_cache(objp);
 	if (!c) {
 		local_irq_restore(flags);
@@ -3878,8 +3891,8 @@ fail:
 }
 
 /* Always called with the slab_mutex held */
-static int do_tune_cpucache(struct kmem_cache *cachep, int limit,
-			    int batchcount, int shared, gfp_t gfp)
+static int __do_tune_cpucache(struct kmem_cache *cachep, int limit,
+				int batchcount, int shared, gfp_t gfp)
 {
 	struct array_cache __percpu *cpu_cache, *prev;
 	int cpu;
@@ -3923,6 +3936,13 @@ static int do_tune_cpucache(struct kmem_cache *cachep, int limit,
 setup_node:
 	return setup_kmem_cache_nodes(cachep, gfp);
 }
+
+static int do_tune_cpucache(struct kmem_cache *cachep, int limit,
+				int batchcount, int shared, gfp_t gfp)
+{
+	return __do_tune_cpucache(cachep, limit, batchcount, shared, gfp);
+}
+
 
 /* Called with slab_mutex held always */
 static int enable_cpucache(struct kmem_cache *cachep, gfp_t gfp)
@@ -4292,8 +4312,7 @@ static void show_symbol(struct seq_file *m, unsigned long address)
 
 static int leaks_show(struct seq_file *m, void *p)
 {
-	struct kmem_cache *cachep = list_entry(p, struct kmem_cache,
-					       root_caches_node);
+	struct kmem_cache *cachep = list_entry(p, struct kmem_cache, list);
 	struct page *page;
 	struct kmem_cache_node *n;
 	const char *name;

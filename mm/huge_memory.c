@@ -2522,7 +2522,14 @@ static void __split_huge_page(struct page *page, struct list_head *list,
 	lruvec = mem_cgroup_page_lruvec(head, zone->zone_pgdat);
 
 	/* complete memcg works before add pages to LRU */
-	mem_cgroup_split_huge_fixup(head);
+	{
+		struct mem_cgroup *memcg = page_memcg(head);
+
+		split_page_memcg(head, HPAGE_PMD_NR);
+		/* The huge-page stat ends when the compound page is split. */
+		if (memcg)
+			__mod_memcg_state(memcg, MEMCG_RSS_HUGE, -HPAGE_PMD_NR);
+	}
 
 	for (i = HPAGE_PMD_NR - 1; i >= 1; i--) {
 		__split_huge_page_tail(head, i, lruvec, list);

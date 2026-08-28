@@ -198,6 +198,17 @@ enum node_stat_item {
 };
 
 /*
+ * Returns true if the value is measured in bytes.  The global and per-node
+ * representation remains page based, while memcg and lruvec values for slab
+ * objects are byte precise.
+ */
+static __always_inline bool vmstat_item_in_bytes(int idx)
+{
+	return idx == NR_SLAB_RECLAIMABLE_B ||
+		idx == NR_SLAB_UNRECLAIMABLE_B;
+}
+
+/*
  * We do arithmetic on the LRU lists in various places in the code,
  * so it is important to keep the active lists LRU_ACTIVE higher in
  * the array than the corresponding inactive lists, and to keep

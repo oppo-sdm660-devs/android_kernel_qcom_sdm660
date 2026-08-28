@@ -210,38 +210,41 @@ static inline int cache_vmstat_idx(struct kmem_cache *s)
 }
 
 #ifdef CONFIG_MEMCG_KMEM
-/* Compatibility wrappers for code that still uses the old slab-local names. */
-static inline struct obj_cgroup **page_obj_cgroups(struct page *page)
-{
-	return page_objcgs(page);
-}
 
-static inline bool page_has_obj_cgroups(struct page *page)
-{
-	return page_objcgs_check(page) != NULL;
-}
-
+/* Allocate the object-cgroup pointer vector for a slab page. */
 int memcg_alloc_page_obj_cgroups(struct page *page, struct kmem_cache *s,
 				 gfp_t gfp, bool new_page);
+static inline void mod_objcg_state(struct obj_cgroup *objcg,
+				   struct pglist_data *pgdat,
+				   enum node_stat_item idx, int nr)
+{
+	struct mem_cgroup *memcg;
+	struct lruvec *lruvec;
+
+	rcu_read_lock();
+	memcg = obj_cgroup_memcg(objcg);
+	lruvec = mem_cgroup_lruvec(pgdat, memcg);
+	mod_memcg_lruvec_state(lruvec, idx, nr);
+	rcu_read_unlock();
+}
 
 static inline void memcg_free_page_obj_cgroups(struct page *page)
 {
-	kfree(page_objcgs(page));
+	struct obj_cgroup **objcgs = page_objcgs_check(page);
+
+	/* KFENCE stores its per-object slot in static metadata. */
+	if (!is_kfence_address(page_address(page)))
+		kfree(objcgs);
 	page->memcg_data = 0;
 }
 
-static inline size_t obj_full_size(struct kmem_cache *s)
+static __always_inline size_t obj_full_size(struct kmem_cache *s)
 {
-	/*
-	 * For each accounted object there is an extra space which is used
-	 * to store obj_cgroup membership. Charge it too.
-	 */
+	/* Account for the metadata pointer kept for every live object. */
 	return s->size + sizeof(struct obj_cgroup *);
 }
 
-/*
- * Returns false if the allocation should fail.
- */
+/* Returns false if the allocation should fail. */
 static inline bool memcg_slab_pre_alloc_hook(struct kmem_cache *s,
 					     struct obj_cgroup **objcgp,
 					     size_t objects, gfp_t flags)
@@ -267,20 +270,6 @@ static inline bool memcg_slab_pre_alloc_hook(struct kmem_cache *s,
 	return true;
 }
 
-static inline void mod_objcg_state(struct obj_cgroup *objcg,
-				   struct pglist_data *pgdat,
-				   int idx, int nr)
-{
-	struct mem_cgroup *memcg;
-	struct lruvec *lruvec;
-
-	rcu_read_lock();
-	memcg = obj_cgroup_memcg(objcg);
-	lruvec = mem_cgroup_lruvec(pgdat, memcg);
-	mod_memcg_lruvec_state(lruvec, idx, nr);
-	rcu_read_unlock();
-}
-
 static inline void memcg_slab_post_alloc_hook(struct kmem_cache *s,
 					      struct obj_cgroup *objcg,
 					      gfp_t flags, size_t size,
@@ -295,15 +284,9 @@ static inline void memcg_slab_post_alloc_hook(struct kmem_cache *s,
 
 	for (i = 0; i < size; i++) {
 		if (likely(p[i])) {
-			/* Keep the existing 4.19 KFENCE allocation unaccounted. */
-			if (unlikely(is_kfence_address(p[i]))) {
-				obj_cgroup_uncharge(objcg, obj_full_size(s));
-				continue;
-			}
-
 			page = virt_to_head_page(p[i]);
 
-			if (!page_has_obj_cgroups(page) &&
+			if (!page_objcgs_check(page) &&
 			    memcg_alloc_page_obj_cgroups(page, s, flags, false)) {
 				obj_cgroup_uncharge(objcg, obj_full_size(s));
 				continue;
@@ -321,10 +304,19 @@ static inline void memcg_slab_post_alloc_hook(struct kmem_cache *s,
 	obj_cgroup_put(objcg);
 }
 
+static inline void memcg_slab_alloc_error_hook(struct kmem_cache *s,
+					       struct obj_cgroup *objcg,
+					       size_t objects)
+{
+	if (objcg)
+		obj_cgroup_uncharge(objcg, objects * obj_full_size(s));
+}
+
 static inline void memcg_slab_free_hook(struct kmem_cache *s_orig,
-					void **p, int objects)
+					 void **p, int objects)
 {
 	struct kmem_cache *s;
+	struct obj_cgroup **objcgs;
 	struct obj_cgroup *objcg;
 	struct page *page;
 	unsigned int off;
@@ -334,24 +326,21 @@ static inline void memcg_slab_free_hook(struct kmem_cache *s_orig,
 		return;
 
 	for (i = 0; i < objects; i++) {
-		if (unlikely(!p[i]) || unlikely(is_kfence_address(p[i])))
+		if (unlikely(!p[i]))
 			continue;
 
 		page = virt_to_head_page(p[i]);
-		if (!page_has_obj_cgroups(page))
+		objcgs = page_objcgs_check(page);
+		if (!objcgs)
 			continue;
 
-		if (!s_orig)
-			s = page->slab_cache;
-		else
-			s = s_orig;
-
+		s = s_orig ? s_orig : page->slab_cache;
 		off = obj_to_index(s, page, p[i]);
-		objcg = page_objcgs(page)[off];
+		objcg = objcgs[off];
 		if (!objcg)
 			continue;
 
-		page_objcgs(page)[off] = NULL;
+		objcgs[off] = NULL;
 		obj_cgroup_uncharge(objcg, obj_full_size(s));
 		mod_objcg_state(objcg, page_pgdat(page), cache_vmstat_idx(s),
 				-obj_full_size(s));
@@ -360,15 +349,6 @@ static inline void memcg_slab_free_hook(struct kmem_cache *s_orig,
 }
 
 #else /* CONFIG_MEMCG_KMEM */
-static inline bool page_has_obj_cgroups(struct page *page)
-{
-	return false;
-}
-
-static inline struct mem_cgroup *memcg_from_slab_obj(void *ptr)
-{
-	return NULL;
-}
 
 static inline int memcg_alloc_page_obj_cgroups(struct page *page,
 					       struct kmem_cache *s, gfp_t gfp,
@@ -390,16 +370,42 @@ static inline bool memcg_slab_pre_alloc_hook(struct kmem_cache *s,
 
 static inline void memcg_slab_post_alloc_hook(struct kmem_cache *s,
 					      struct obj_cgroup *objcg,
-					      gfp_t flags, size_t size,
-					      void **p)
+					      gfp_t flags, size_t size, void **p)
+{
+}
+
+static inline void memcg_slab_alloc_error_hook(struct kmem_cache *s,
+					       struct obj_cgroup *objcg,
+					       size_t objects)
 {
 }
 
 static inline void memcg_slab_free_hook(struct kmem_cache *s,
-					void **p, int objects)
+					 void **p, int objects)
 {
 }
 #endif /* CONFIG_MEMCG_KMEM */
+
+/* Slab pages are accounted globally/node-wide; objects are accounted by objcg. */
+static __always_inline void account_slab_page(struct page *page, int order,
+					      struct kmem_cache *s, gfp_t gfp)
+{
+	if (memcg_kmem_enabled() && (s->flags & SLAB_ACCOUNT))
+		memcg_alloc_page_obj_cgroups(page, s, gfp, true);
+
+	mod_node_page_state(page_pgdat(page), cache_vmstat_idx(s),
+				    PAGE_SIZE << order);
+}
+
+static __always_inline void unaccount_slab_page(struct page *page, int order,
+						struct kmem_cache *s)
+{
+	if (memcg_kmem_enabled())
+		memcg_free_page_obj_cgroups(page);
+
+	mod_node_page_state(page_pgdat(page), cache_vmstat_idx(s),
+				    -(PAGE_SIZE << order));
+}
 
 static inline struct kmem_cache *virt_to_cache(const void *obj)
 {
@@ -412,36 +418,16 @@ static inline struct kmem_cache *virt_to_cache(const void *obj)
 	return page->slab_cache;
 }
 
-static __always_inline void account_slab_page(struct page *page, int order,
-					      struct kmem_cache *s, gfp_t gfp)
-{
-	if (memcg_kmem_enabled() && (s->flags & SLAB_ACCOUNT))
-		memcg_alloc_page_obj_cgroups(page, s, gfp, true);
-
-	mod_node_page_state(page_pgdat(page), cache_vmstat_idx(s),
-			    PAGE_SIZE << order);
-}
-
-static __always_inline void unaccount_slab_page(struct page *page, int order,
-						struct kmem_cache *s)
-{
-	if (memcg_kmem_enabled())
-		memcg_free_page_obj_cgroups(page);
-
-	mod_node_page_state(page_pgdat(page), cache_vmstat_idx(s),
-			    -(PAGE_SIZE << order));
-}
-
 static inline struct kmem_cache *cache_from_obj(struct kmem_cache *s, void *x)
 {
 	struct kmem_cache *cachep;
 
 	if (!IS_ENABLED(CONFIG_SLAB_FREELIST_HARDENED) &&
-	    !kmem_cache_debug_flags(s, SLAB_CONSISTENCY_CHECKS))
+	    !unlikely(s->flags & SLAB_CONSISTENCY_CHECKS))
 		return s;
 
 	cachep = virt_to_cache(x);
-	if (WARN(cachep && cachep != s,
+	WARN_ONCE(cachep && cachep != s,
 		  "%s: Wrong slab cache. %s but object is from %s\n",
 		  __func__, s->name, cachep->name);
 	return cachep;
@@ -565,7 +551,9 @@ static inline struct kmem_cache_node *get_node(struct kmem_cache *s, int node)
 void *slab_start(struct seq_file *m, loff_t *pos);
 void *slab_next(struct seq_file *m, void *p, loff_t *pos);
 void slab_stop(struct seq_file *m, void *p);
+#ifdef CONFIG_MEMCG_KMEM
 int memcg_slab_show(struct seq_file *m, void *p);
+#endif
 
 #if defined(CONFIG_SLAB) || defined(CONFIG_SLUB_DEBUG)
 void dump_unreclaimable_slab(void);

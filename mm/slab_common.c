@@ -128,6 +128,8 @@ int __kmem_cache_alloc_bulk(struct kmem_cache *s, gfp_t flags, size_t nr,
 	return i;
 }
 
+
+
 /*
  * Figure out what the alignment of the objects will be given a set of
  * flags, a user specified alignment and the size of the objects.
@@ -164,6 +166,7 @@ int slab_unmergeable(struct kmem_cache *s)
 {
 	if (slab_nomerge || (s->flags & SLAB_NEVER_MERGE))
 		return 1;
+
 
 	if (s->ctor)
 		return 1;
@@ -230,8 +233,7 @@ struct kmem_cache *find_mergeable(unsigned int size, unsigned int align,
 static struct kmem_cache *create_cache(const char *name,
 		unsigned int object_size, unsigned int align,
 		slab_flags_t flags, unsigned int useroffset,
-		unsigned int usersize, void (*ctor)(void *),
-		struct kmem_cache *root_cache)
+		unsigned int usersize, void (*ctor)(void *))
 {
 	struct kmem_cache *s;
 	int err;
@@ -250,6 +252,7 @@ static struct kmem_cache *create_cache(const char *name,
 	s->ctor = ctor;
 	s->useroffset = useroffset;
 	s->usersize = usersize;
+
 
 	err = __kmem_cache_create(s, flags);
 	if (err)
@@ -346,7 +349,7 @@ kmem_cache_create_usercopy(const char *name,
 
 	s = create_cache(cache_name, size,
 			 calculate_alignment(flags, align, size),
-			 flags, useroffset, usersize, ctor, NULL);
+			 flags, useroffset, usersize, ctor);
 	if (IS_ERR(s)) {
 		err = PTR_ERR(s);
 		kfree_const(cache_name);
@@ -468,6 +471,7 @@ void kmem_cache_destroy(struct kmem_cache *s)
 		goto out_unlock;
 
 	err = shutdown_cache(s);
+
 	if (err) {
 		pr_err("kmem_cache_destroy %s: Slab cache still has objects\n",
 		       s->name);
@@ -520,6 +524,7 @@ void __init create_boot_cache(struct kmem_cache *s, const char *name,
 	s->align = calculate_alignment(flags, ARCH_KMALLOC_MINALIGN, size);
 	s->useroffset = useroffset;
 	s->usersize = usersize;
+
 
 	err = __kmem_cache_create(s, flags);
 
@@ -774,7 +779,13 @@ void *kmalloc_order(size_t size, gfp_t flags, unsigned int order)
 
 	flags |= __GFP_COMP;
 	page = alloc_pages(flags, order);
-	ret = page ? page_address(page) : NULL;
+	if (page) {
+		ret = page_address(page);
+		mod_lruvec_page_state(page, NR_SLAB_UNRECLAIMABLE_B,
+				      PAGE_SIZE << order);
+	} else {
+		ret = NULL;
+	}
 	ret = kasan_kmalloc_large(ret, size, flags);
 	kmemleak_alloc(ret, size, 1, flags);
 	return ret;
@@ -889,6 +900,7 @@ static void cache_show(struct kmem_cache *s, struct seq_file *m)
 	memset(&sinfo, 0, sizeof(sinfo));
 	get_slabinfo(s, &sinfo);
 
+
 	seq_printf(m, "%-17s %6lu %6lu %6u %4u %4d",
 		   s->name, sinfo.active_objs, sinfo.num_objs, s->size,
 		   sinfo.objects_per_slab, (1 << sinfo.cache_order));
@@ -945,13 +957,10 @@ void dump_unreclaimable_slab(void)
 	mutex_unlock(&slab_mutex);
 }
 
-#if defined(CONFIG_MEMCG)
+#if defined(CONFIG_MEMCG_KMEM)
 int memcg_slab_show(struct seq_file *m, void *p)
 {
-	/*
-	 * Deprecated.
-	 * Please, take a look at tools/cgroup/slabinfo.py .
-	 */
+	/* Slab objects are accounted through objcg; per-memcg caches no longer exist. */
 	return 0;
 }
 #endif
@@ -996,7 +1005,6 @@ static int __init slab_proc_init(void)
 	return 0;
 }
 module_init(slab_proc_init);
-
 #endif /* CONFIG_SLAB || CONFIG_SLUB_DEBUG */
 
 static __always_inline void *__do_krealloc(const void *p, size_t new_size,

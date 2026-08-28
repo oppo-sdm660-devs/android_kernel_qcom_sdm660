@@ -182,21 +182,22 @@ struct mem_cgroup_thresholds {
 	struct mem_cgroup_threshold_ary *spare;
 };
 
+#ifdef CONFIG_MEMCG_KMEM
 /*
- * Bucket for arbitrarily byte-sized objects charged to a memory
- * cgroup. The bucket can be reparented in one piece when the cgroup
- * is destroyed, without having to round up the individual references
- * of all live memory objects in the wild.
+ * A byte-granular accounting bucket for kernel objects.  Object references
+ * may outlive the originating memory cgroup; the bucket is therefore
+ * reparented as a unit when the cgroup goes offline.
  */
 struct obj_cgroup {
 	struct percpu_ref refcnt;
 	struct mem_cgroup *memcg;
 	atomic_t nr_charged_bytes;
 	union {
-		struct list_head list;
+		struct list_head list; /* protected by css_set_lock */
 		struct rcu_head rcu;
 	};
 };
+#endif
 
 enum memcg_kmem_state {
 	KMEM_NONE,
@@ -314,11 +315,12 @@ struct mem_cgroup {
 	int			tcpmem_pressure;
 
 #ifdef CONFIG_MEMCG_KMEM
-	/* Index used by memcg-aware shrinker lists. */
+        /* Index used by memcg-aware list_lru instances */
 	int kmemcg_id;
 	enum memcg_kmem_state kmem_state;
 	struct obj_cgroup __rcu *objcg;
-	struct list_head objcg_list; /* list of inherited objcgs */
+	/* Inherited objcgs, protected by css_set_lock. */
+	struct list_head objcg_list;
 #endif
 
 	int last_scanned_node;
@@ -436,6 +438,7 @@ static inline void mem_cgroup_put(struct mem_cgroup *memcg)
 		css_put(&memcg->css);
 }
 
+#ifdef CONFIG_MEMCG_KMEM
 static inline bool obj_cgroup_tryget(struct obj_cgroup *objcg)
 {
 	return percpu_ref_tryget(&objcg->refcnt);
@@ -451,17 +454,9 @@ static inline void obj_cgroup_put(struct obj_cgroup *objcg)
 	percpu_ref_put(&objcg->refcnt);
 }
 
-/*
- * After the initialization objcg->memcg is always pointing at
- * a valid memcg, but can be atomically swapped to the parent memcg.
- *
- * The caller must ensure that the returned memcg won't be released:
- * e.g. acquire the rcu_read_lock or css_set_lock.
- */
-static inline struct mem_cgroup *obj_cgroup_memcg(struct obj_cgroup *objcg)
-{
-	return READ_ONCE(objcg->memcg);
-}
+/* The caller must hold RCU or another lifetime reference on the memcg. */
+struct mem_cgroup *obj_cgroup_memcg(struct obj_cgroup *objcg);
+#endif
 
 #define mem_cgroup_from_counter(counter, member)	\
 	container_of(counter, struct mem_cgroup, member)
@@ -878,9 +873,7 @@ static inline void memcg_memory_event_mm(struct mm_struct *mm,
 	rcu_read_unlock();
 }
 
-#ifdef CONFIG_TRANSPARENT_HUGEPAGE
-void mem_cgroup_split_huge_fixup(struct page *head);
-#endif
+void split_page_memcg(struct page *head, unsigned int nr);
 
 #else /* CONFIG_MEMCG */
 
@@ -1189,7 +1182,7 @@ unsigned long mem_cgroup_soft_limit_reclaim(pg_data_t *pgdat, int order,
 	return 0;
 }
 
-static inline void mem_cgroup_split_huge_fixup(struct page *head)
+static inline void split_page_memcg(struct page *head, unsigned int nr)
 {
 }
 
@@ -1366,16 +1359,13 @@ static inline bool mem_cgroup_under_socket_pressure(struct mem_cgroup *memcg)
 }
 #endif
 
-int memcg_kmem_charge_memcg(struct page *page, gfp_t gfp, int order,
-			    struct mem_cgroup *memcg);
-int memcg_kmem_charge(struct page *page, gfp_t gfp, int order);
-void memcg_kmem_uncharge(struct page *page, int order);
-
 #ifdef CONFIG_MEMCG_KMEM
 int __memcg_kmem_charge(struct mem_cgroup *memcg, gfp_t gfp,
 			unsigned int nr_pages);
 void __memcg_kmem_uncharge(struct mem_cgroup *memcg,
 			   unsigned int nr_pages);
+int __memcg_kmem_charge_page(struct page *page, gfp_t gfp, int order);
+void __memcg_kmem_uncharge_page(struct page *page, int order);
 struct obj_cgroup *get_obj_cgroup_from_current(void);
 int obj_cgroup_charge(struct obj_cgroup *objcg, gfp_t gfp, size_t size);
 void obj_cgroup_uncharge(struct obj_cgroup *objcg, size_t size);
@@ -1396,7 +1386,7 @@ void memcg_put_cache_ids(void);
 
 static inline bool memcg_kmem_enabled(void)
 {
-	return static_branch_unlikely(&memcg_kmem_enabled_key);
+	return static_branch_likely(&memcg_kmem_enabled_key);
 }
 
 static inline int memcg_kmem_charge_page(struct page *page, gfp_t gfp,
@@ -1413,21 +1403,6 @@ static inline void memcg_kmem_uncharge_page(struct page *page, int order)
 		__memcg_kmem_uncharge_page(page, order);
 }
 
-static inline int memcg_kmem_charge(struct mem_cgroup *memcg, gfp_t gfp,
-				    unsigned int nr_pages)
-{
-	if (memcg_kmem_enabled())
-		return __memcg_kmem_charge(memcg, gfp, nr_pages);
-	return 0;
-}
-
-static inline void memcg_kmem_uncharge(struct mem_cgroup *memcg,
-				       unsigned int nr_pages)
-{
-	if (memcg_kmem_enabled())
-		__memcg_kmem_uncharge(memcg, nr_pages);
-}
-
 /*
  * helper for accessing a memcg's index. It will be used as an index in the
  * child cache array in kmem_cache, and also to derive its name. This function
@@ -1438,6 +1413,7 @@ static inline int memcg_cache_id(struct mem_cgroup *memcg)
 	return memcg ? memcg->kmemcg_id : -1;
 }
 
+/* Return the memcg which owns a slab object or a non-slab kmem page. */
 struct mem_cgroup *mem_cgroup_from_obj(void *p);
 
 extern int memcg_expand_shrinker_maps(int new_id);
@@ -1451,6 +1427,16 @@ extern void memcg_set_shrinker_bit(struct mem_cgroup *memcg,
 static inline bool memcg_kmem_enabled(void)
 {
 	return false;
+}
+
+static inline int memcg_kmem_charge_page(struct page *page, gfp_t gfp,
+					 int order)
+{
+	return 0;
+}
+
+static inline void memcg_kmem_uncharge_page(struct page *page, int order)
+{
 }
 
 static inline int memcg_cache_id(struct mem_cgroup *memcg)
